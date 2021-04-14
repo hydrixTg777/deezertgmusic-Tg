@@ -1,19 +1,35 @@
 import asyncio
+import io
 import locale
 import logging
 import os
 import re
 import shutil
+import traceback
 
 import deezloader
 import requests
-from aiogram import Bot, Dispatcher, executor, types
+from aiogram import Bot, Dispatcher, executor, types, exceptions
 from aiogram.types import InlineQuery, \
-    InputTextMessageContent, InlineQueryResultArticle
+    InputTextMessageContent, InlineQueryResultArticle, InputMediaAudio
 from aioify import aioify
 from deezloader.deezer_settings import api_track, api_album, api_search_trk, api_playlist
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, APIC, error
+from youtube_dl import YoutubeDL
+from PIL import Image
 
 locale.setlocale(locale.LC_TIME, '')
+
+try:
+    os.mkdir("tmp")
+except FileExistsError:
+    pass
+
+try:
+    os.mkdir("tmp/yt/")
+except FileExistsError:
+    pass
 
 logging.basicConfig(level=logging.INFO)
 
@@ -26,6 +42,98 @@ bot = Bot(token=os.environ.get('TELEGRAM_TOKEN'))
 dp = Dispatcher(bot)
 
 
+def crop_center(pil_img, crop_width, crop_height):
+    img_width, img_height = pil_img.size
+    return pil_img.crop(((img_width - crop_width) // 2,
+                         (img_height - crop_height) // 2,
+                         (img_width + crop_width) // 2,
+                         (img_height + crop_height) // 2))
+
+
+@dp.message_handler(regexp=r"^(http(s)?:\/\/)?((w){3}.)?youtu(be|.be)?(\.com)?\/.+")
+async def get_youtube_audio(event: types.Message):
+    print(event.from_user)
+    if event.from_user.id not in downloading_users:
+        tmp_msg = await event.answer("Téléchargement en cours...")
+        downloading_users.append(event.from_user.id)
+        try:
+            ydl_opts = {
+                'outtmpl': 'tmp/yt/%(id)s.%(ext)s',
+                'format': 'bestaudio/best',
+                'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}],
+            }
+
+            # Download file
+            ydl = YoutubeDL(ydl_opts)
+            dict_info = ydl.extract_info(event.text, download=True)
+
+            thumb = dict_info["thumbnail"]
+
+            # Get thumb
+            content = requests.get(thumb).content
+            image_bytes = io.BytesIO(content)
+
+            upload_date = dict_info["upload_date"]
+            upload_date = upload_date[6:8] + "/" + upload_date[4:6] + "/" + upload_date[0:4]
+
+            # Send cover
+            await event.answer_photo(image_bytes.read(),
+                                     caption='<b>Track: {}</b>'
+                                             '\n{} - {}\n'
+                                             '\n<a href="{}">Lien du track</a>'
+                                     .format(
+                                         dict_info['title'],
+                                         dict_info["uploader"], upload_date,
+                                         "https://youtu.be/" + dict_info["id"]),
+                                     parse_mode='HTML'
+                                     )
+
+            # Delete user message
+            await event.delete()
+
+            location = "tmp/yt/" + dict_info["id"] + '.mp3'
+            tmp_song = open(location, 'rb')
+
+            # TAG audio
+            audio = MP3(location, ID3=ID3)
+            try:
+                audio.add_tags()
+            except error:
+                pass
+            audio.tags.add(APIC(mime='image/jpeg', type=3, desc=u'Cover', data=image_bytes.read()))
+            audio.save()
+
+            # Create thumb
+            roi_img = crop_center(Image.open(image_bytes), 80, 80)
+            img_byte_arr = io.BytesIO()
+            roi_img.save(img_byte_arr, format='jpeg')
+
+            # Send audio
+            await event.answer_audio(tmp_song,
+                                     title=dict_info['title'],
+                                     performer=dict_info['uploader'],
+                                     thumb=img_byte_arr.getvalue(),
+                                     disable_notification=True)
+            try:
+                shutil.rmtree(os.path.dirname(location))
+            except FileNotFoundError:
+                pass
+        except:
+            traceback.print_exc()
+            await event.answer("Erreur lors du téléchargement.")
+        finally:
+            await tmp_msg.delete()
+            try:
+                downloading_users.remove(event.from_user.id)
+            except ValueError:
+                pass
+    else:
+        tmp_err_msg = await event.answer("Un téléchargement est déjà en cours!!")
+        await event.delete()
+        await asyncio.sleep(2)
+        await tmp_err_msg.delete()
+
+
 @dp.message_handler(regexp=r"^https?:\/\/(?:www\.)?deezer\.com\/([a-z]*\/)?track\/(\d+)\/?$")
 async def get_track(event: types.Message):
     print(event.from_user)
@@ -35,34 +143,48 @@ async def get_track(event: types.Message):
             tmp = tmp[:-1]
         tmp_msg = await event.answer("Téléchargement en cours...")
         downloading_users.append(event.from_user.id)
-        dl = await download.download_trackdee(tmp, output="tmp", quality="MP3_320", recursive_download=True,
-                                              recursive_quality=True, not_interface=False)
-        tmp_track = requests.get(api_track % event.text.split('/')[-1]).json()
-        tmp_cover = requests.get(tmp_track['album']['cover_xl'], stream=True).raw
-        tmp_artist_track = []
-        for c in tmp_track['contributors']:
-            tmp_artist_track.append(c['name'])
-        tmp_date = tmp_track['release_date'].split('-')
-        tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
-        await event.answer_photo(tmp_cover,
-                                 caption='<b>Track: {}</b>'
-                                         '\n{} - {}\n<a href="{}">Lien de l\'album</a>'
-                                         '\n<a href="{}">Lien du track</a>'
-                                 .format(
-                                     tmp_track['title'], tmp_track['artist']['name'],
-                                     tmp_date, tmp_track['album']['link'], tmp_track['link']), parse_mode='HTML'
-                                 )
-        await event.delete()
-
-        await event.answer_audio(open(dl, 'rb'), title=tmp_track['title'],
-                                 performer=', '.join(tmp_artist_track))
-        await tmp_msg.delete()
         try:
-            shutil.rmtree(os.path.dirname(dl))
-        except FileNotFoundError:
-            pass
-        downloading_users.remove(event.from_user.id)
+            dl = await download.download_trackdee(tmp, output="tmp", quality="MP3_320", recursive_download=True,
+                                                  recursive_quality=True, not_interface=False)
+            tmp_track = requests.get(api_track % event.text.split('/')[-1]).json()
+            tmp_cover = requests.get(tmp_track['album']['cover_xl'], stream=True).raw
+            tmp_artist_track = []
+            for c in tmp_track['contributors']:
+                tmp_artist_track.append(c['name'])
+            tmp_date = tmp_track['release_date'].split('-')
+            tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
+            await event.answer_photo(tmp_cover,
+                                     caption='<b>Track: {}</b>'
+                                             '\n{} - {}\n<a href="{}">Lien de l\'album</a>'
+                                             '\n<a href="{}">Lien du track</a>'
+                                     .format(
+                                         tmp_track['title'], tmp_track['artist']['name'],
+                                         tmp_date, tmp_track['album']['link'], tmp_track['link']), parse_mode='HTML'
+                                     )
 
+            # Delete user message
+            await event.delete()
+
+            tmp_song = open(dl, 'rb')
+            duration = int(MP3(tmp_song).info.length)
+            await event.answer_audio(tmp_song,
+                                     title=tmp_track['title'],
+                                     performer=', '.join(tmp_artist_track),
+                                     duration=duration,
+                                     disable_notification=True)
+            await tmp_msg.delete()
+            try:
+                shutil.rmtree(os.path.dirname(dl))
+            except FileNotFoundError:
+                pass
+        except KeyError:
+            await tmp_msg.delete()
+            await event.answer("Erreur lors du téléchargement.")
+        finally:
+            try:
+                downloading_users.remove(event.from_user.id)
+            except ValueError:
+                pass
     else:
         tmp_err_msg = await event.answer("Un téléchargement est déjà en cours!!")
         await event.delete()
@@ -79,38 +201,73 @@ async def get_album(event: types.Message):
             tmp = tmp[:-1]
         tmp_msg = await event.answer("Téléchargement en cours...")
         downloading_users.append(event.from_user.id)
-        dl = await download.download_albumdee(tmp, output="tmp", quality="MP3_320", recursive_download=True,
-                                              recursive_quality=True, not_interface=False)
-        album = requests.get(api_album % event.text.split('/')[-1]).json()
-        tracks = requests.get(api_album % event.text.split('/')[-1] + '/tracks?limit=100').json()
-        tmp_cover = requests.get(album['cover_xl'], stream=True).raw
-        tmp_titles = []
-        tmp_artists = []
-        for track in tracks['data']:
-            tmp_titles.append(track['title'])
-            tmp_track = requests.get(api_track % track['id']).json()
-            tmp_artist_track = []
-            for c in tmp_track['contributors']:
-                tmp_artist_track.append(c['name'])
-            tmp_artists.append(tmp_artist_track)
-        tmp_count = 0
-        tmp_date = album['release_date'].split('-')
-        tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
-        await event.answer_photo(tmp_cover,
-                                 caption='<b>Album: {}</b>\n{} - {}\n<a href="{}">Lien de l\'album</a>'.format(
-                                     album['title'], album['artist']['name'],
-                                     tmp_date, album['link']), parse_mode='HTML')
-        await event.delete()
-        for i in dl:
-            await event.answer_audio(open(i, 'rb'), title=tmp_titles[tmp_count],
-                                     performer=', '.join(tmp_artists[tmp_count]))
-            tmp_count += 1
-        await tmp_msg.delete()
         try:
-            shutil.rmtree(os.path.dirname(dl[0]))
-        except FileNotFoundError:
-            pass
-        downloading_users.remove(event.from_user.id)
+            dl = await download.download_albumdee(tmp,
+                                                  output="tmp",
+                                                  quality="MP3_320",
+                                                  recursive_download=True,
+                                                  recursive_quality=True,
+                                                  not_interface=False)
+            album = requests.get(api_album % event.text.split('/')[-1]).json()
+            tracks = requests.get(api_album % event.text.split('/')[-1] + '/tracks?limit=100').json()
+            tmp_cover = requests.get(album['cover_xl'], stream=True).raw
+            tmp_titles = []
+            tmp_artists = []
+            for track in tracks['data']:
+                tmp_titles.append(track['title'])
+                tmp_track = requests.get(api_track % track['id']).json()
+                tmp_artist_track = []
+                for c in tmp_track['contributors']:
+                    tmp_artist_track.append(c['name'])
+                tmp_artists.append(tmp_artist_track)
+            tmp_date = album['release_date'].split('-')
+            tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
+            await event.answer_photo(tmp_cover,
+                                     caption='<b>Album: {}</b>\n{} - {}\n<a href="{}">Lien de l\'album</a>'.format(
+                                         album['title'], album['artist']['name'],
+                                         tmp_date, album['link']),
+                                     parse_mode='HTML')
+
+            # Delete user message
+            await event.delete()
+
+            try:
+                tmp_count = 0
+                group_media = []
+
+                for i in dl:
+                    tmp_song = open(i, 'rb')
+                    duration = int(MP3(tmp_song).info.length)
+                    group_media.append(InputMediaAudio(media=tmp_song,
+                                                       title=tmp_titles[tmp_count],
+                                                       performer=', '.join(tmp_artists[tmp_count]),
+                                                       duration=duration))
+                    tmp_count += 1
+                await event.answer_media_group(group_media, disable_notification=True)
+            except exceptions.NetworkError:
+                tmp_count = 0
+                for i in dl:
+                    tmp_song = open(i, 'rb')
+                    duration = int(MP3(tmp_song).info.length)
+                    await event.answer_audio(tmp_song,
+                                             title=tmp_titles[tmp_count],
+                                             performer=', '.join(tmp_artists[tmp_count]),
+                                             duration=duration,
+                                             disable_notification=True)
+                    tmp_count += 1
+            await tmp_msg.delete()
+            try:
+                shutil.rmtree(os.path.dirname(dl[0]))
+            except FileNotFoundError:
+                pass
+        except KeyError:
+            await tmp_msg.delete()
+            await event.answer("Erreur lors du téléchargement.")
+        finally:
+            try:
+                downloading_users.remove(event.from_user.id)
+            except ValueError:
+                pass
 
     else:
         tmp_err_msg = await event.answer("Un téléchargement est déjà en cours!!")
@@ -128,38 +285,58 @@ async def get_playlist(event: types.Message):
             tmp = tmp[:-1]
         tmp_msg = await event.answer("Téléchargement en cours...")
         downloading_users.append(event.from_user.id)
-        dl = await download.download_playlistdee(tmp, output="tmp", quality="MP3_320", recursive_download=True,
-                                              recursive_quality=True, not_interface=False)
-        album = requests.get(api_playlist % event.text.split('/')[-1]).json()
-        tracks = requests.get(api_playlist % event.text.split('/')[-1] + '/tracks?limit=100').json()
-        tmp_cover = requests.get(album['picture_xl'], stream=True).raw
-        tmp_titles = []
-        tmp_artists = []
-        for track in tracks['data']:
-            tmp_titles.append(track['title'])
-            tmp_track = requests.get(api_track % track['id']).json()
-            tmp_artist_track = []
-            for c in tmp_track['contributors']:
-                tmp_artist_track.append(c['name'])
-            tmp_artists.append(tmp_artist_track)
-        tmp_count = 0
-        tmp_date = album['creation_date'].split(' ')[0].split('-')
-        tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
-        await event.answer_photo(tmp_cover,
-                                 caption='<b>Playlist: {}</b>\n{} - {}\n<a href="{}">Lien de la playlist</a>'.format(
-                                     album['title'], album['creator']['name'], tmp_date, album['link']), parse_mode='HTML')
-        await event.delete()
-        for i in dl:
-            await event.answer_audio(open(i, 'rb'), title=tmp_titles[tmp_count],
-                                     performer=', '.join(tmp_artists[tmp_count]))
-            tmp_count += 1
-        await tmp_msg.delete()
         try:
-            shutil.rmtree(os.path.dirname(dl[0]))
-        except FileNotFoundError:
-            pass
-        downloading_users.remove(event.from_user.id)
+            dl = await download.download_playlistdee(tmp,
+                                                     output="tmp",
+                                                     quality="MP3_320",
+                                                     recursive_download=True,
+                                                     recursive_quality=True,
+                                                     not_interface=False)
+            album = requests.get(api_playlist % event.text.split('/')[-1]).json()
+            tracks = requests.get(api_playlist % event.text.split('/')[-1] + '/tracks?limit=100').json()
+            tmp_cover = requests.get(album['picture_xl'], stream=True).raw
+            tmp_titles = []
+            tmp_artists = []
+            for track in tracks['data']:
+                tmp_titles.append(track['title'])
+                tmp_track = requests.get(api_track % track['id']).json()
+                tmp_artist_track = []
+                for c in tmp_track['contributors']:
+                    tmp_artist_track.append(c['name'])
+                tmp_artists.append(tmp_artist_track)
+            tmp_count = 0
+            tmp_date = album['creation_date'].split(' ')[0].split('-')
+            tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
+            await event.answer_photo(tmp_cover,
+                                     caption='<b>Playlist: {}</b>\n{} - {}\n<a href="{}">Lien de la playlist</a>'.format(
+                                         album['title'], album['creator']['name'], tmp_date, album['link']),
+                                     parse_mode='HTML')
 
+            # Delete user message
+            await event.delete()
+
+            for i in dl:
+                tmp_song = open(i, 'rb')
+                duration = int(MP3(tmp_song).info.length)
+                await event.answer_audio(tmp_song,
+                                         title=tmp_titles[tmp_count],
+                                         performer=', '.join(tmp_artists[tmp_count]),
+                                         duration=duration,
+                                         disable_notification=True)
+                tmp_count += 1
+            await tmp_msg.delete()
+            try:
+                shutil.rmtree(os.path.dirname(dl[0]))
+            except FileNotFoundError:
+                pass
+        except KeyError:
+            await tmp_msg.delete()
+            await event.answer("Erreur lors du téléchargement.")
+        finally:
+            try:
+                downloading_users.remove(event.from_user.id)
+            except ValueError:
+                pass
     else:
         tmp_err_msg = await event.answer("Un téléchargement est déjà en cours!!")
         await event.delete()
