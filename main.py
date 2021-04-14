@@ -344,7 +344,7 @@ async def get_playlist(event: types.Message):
         await tmp_err_msg.delete()
 
 
-@dp.message_handler(commands=['help'])
+@dp.message_handler(commands=['start'])
 async def test(event: types.Message):
     bot_info = await bot.get_me()
     bot_name = bot_info.first_name.replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("`", "\\`")
