@@ -30,7 +30,7 @@ API_SEARCH_TRK = API_URL + "/search/track/?q=%s"
 API_PLAYLIST = API_URL + "/playlist/%s"
 
 DEFAULT_QUALITY = "MP3_320"
-
+DEFAULT_QUALITY = os.environ.get('DEFAULT_QUALITY')
 try:
     os.mkdir("tmp")
 except FileExistsError:
