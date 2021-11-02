@@ -1,11 +1,13 @@
 import asyncio
 import io
+import json
 import locale
 import logging
 import os
 import re
 import shutil
 import traceback
+from urllib.parse import quote
 
 import deezloader
 import requests
@@ -17,7 +19,6 @@ from aioify import aioify
 from mutagen.id3 import ID3, APIC, error
 from mutagen.mp3 import MP3
 from youtube_dl import YoutubeDL
-from urllib.parse import quote
 
 locale.setlocale(locale.LC_TIME, '')
 
@@ -29,8 +30,8 @@ API_ALBUM = API_URL + "/album/%s"
 API_SEARCH_TRK = API_URL + "/search/track/?q=%s"
 API_PLAYLIST = API_URL + "/playlist/%s"
 
-# DEFAULT_QUALITY = "MP3_320"
-DEFAULT_QUALITY = os.environ.get('DEFAULT_QUALITY')
+DEFAULT_QUALITY = "MP3_320"
+
 try:
     os.mkdir("tmp")
 except FileExistsError:
@@ -51,6 +52,19 @@ downloading_users = []
 bot = Bot(token=os.environ.get('TELEGRAM_TOKEN'))
 dp = Dispatcher(bot)
 
+LANGS_FILE = json.load(open('langs.json'))
+LANG = os.environ.get('BOT_LANG')
+
+if LANG is not None:
+    print("Lang : " + LANG)
+else:
+    print("Lang : en")
+    LANG = 'en'
+
+
+def __(s):
+    return LANGS_FILE[s][LANG]
+
 
 def crop_center(pil_img, crop_width, crop_height):
     img_width, img_height = pil_img.size
@@ -64,7 +78,7 @@ def crop_center(pil_img, crop_width, crop_height):
 async def get_youtube_audio(event: types.Message):
     print(event.from_user)
     if event.from_user.id not in downloading_users:
-        tmp_msg = await event.answer("Téléchargement en cours...")
+        tmp_msg = await event.answer(__('downloading'))
         downloading_users.append(event.from_user.id)
         try:
             ydl_opts = {
@@ -88,13 +102,13 @@ async def get_youtube_audio(event: types.Message):
 
             # Send cover
             await event.answer_photo(image_bytes.read(),
-                                     caption='<b>Track: {}</b>'
-                                             '\n{} - {}\n'
-                                             '\n<a href="{}">Lien du track</a>'
+                                     caption=('<b>Track: {}</b>'
+                                              '\n{} - {}\n\n<a href="{}">' + __('track_link') + '</a>')
                                      .format(
                                          dict_info['title'],
                                          dict_info["uploader"], upload_date,
-                                         "https://youtu.be/" + dict_info["id"]),
+                                         "https://youtu.be/" + dict_info["id"]
+                                     ),
                                      parse_mode='HTML'
                                      )
 
@@ -128,9 +142,9 @@ async def get_youtube_audio(event: types.Message):
                 shutil.rmtree(os.path.dirname(location))
             except FileNotFoundError:
                 pass
-        except:
+        except Exception as e:
             traceback.print_exc()
-            await event.answer("Erreur lors du téléchargement.")
+            await event.answer(__('download_error') + ' ' + str(e))
         finally:
             await tmp_msg.delete()
             try:
@@ -138,7 +152,7 @@ async def get_youtube_audio(event: types.Message):
             except ValueError:
                 pass
     else:
-        tmp_err_msg = await event.answer("Un téléchargement est déjà en cours!!")
+        tmp_err_msg = await event.answer(__('running_download'))
         await event.delete()
         await asyncio.sleep(2)
         await tmp_err_msg.delete()
@@ -151,13 +165,13 @@ async def get_track(event: types.Message):
         tmp = event.text
         if tmp[-1] == '/':
             tmp = tmp[:-1]
-        tmp_msg = await event.answer("Téléchargement en cours...")
+        tmp_msg = await event.answer(__('downloading'))
         downloading_users.append(event.from_user.id)
         try:
             dl = await download.download_trackdee(tmp, output_dir="tmp", quality_download=DEFAULT_QUALITY,
                                                   recursive_download=True,
                                                   recursive_quality=True, not_interface=False)
-            tmp_track = requests.get(API_TRACK % quote(event.text.split('/')[-1])).json()
+            tmp_track = requests.get(API_TRACK % quote(str(event.text.split('/')[-1]))).json()
             tmp_cover = requests.get(tmp_track['album']['cover_xl'], stream=True).raw
             tmp_artist_track = []
             for c in tmp_track['contributors']:
@@ -165,9 +179,9 @@ async def get_track(event: types.Message):
             tmp_date = tmp_track['release_date'].split('-')
             tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
             await event.answer_photo(tmp_cover,
-                                     caption='<b>Track: {}</b>'
-                                             '\n{} - {}\n<a href="{}">Lien de l\'album</a>'
-                                             '\n<a href="{}">Lien du track</a>'
+                                     caption=('<b>Track: {}</b>'
+                                              '\n{} - {}\n<a href="{}">' + __('album_link')
+                                              + '</a>\n<a href="{}">' + __('track_link') + '</a>')
                                      .format(
                                          tmp_track['title'], tmp_track['artist']['name'],
                                          tmp_date, tmp_track['album']['link'], tmp_track['link']), parse_mode='HTML'
@@ -188,16 +202,16 @@ async def get_track(event: types.Message):
                 shutil.rmtree(os.path.dirname(dl.song_path))
             except FileNotFoundError:
                 pass
-        except KeyError:
+        except Exception as e:
             await tmp_msg.delete()
-            await event.answer("Erreur lors du téléchargement.")
+            await event.answer(__('download_error') + ' ' + str(e))
         finally:
             try:
                 downloading_users.remove(event.from_user.id)
             except ValueError:
                 pass
     else:
-        tmp_err_msg = await event.answer("Un téléchargement est déjà en cours!!")
+        tmp_err_msg = await event.answer(__('running_download'))
         await event.delete()
         await asyncio.sleep(2)
         await tmp_err_msg.delete()
@@ -210,7 +224,7 @@ async def get_album(event: types.Message):
         tmp = event.text
         if tmp[-1] == '/':
             tmp = tmp[:-1]
-        tmp_msg = await event.answer("Téléchargement en cours...")
+        tmp_msg = await event.answer(__('downloading'))
         downloading_users.append(event.from_user.id)
         try:
             dl = await download.download_albumdee(tmp,
@@ -219,14 +233,14 @@ async def get_album(event: types.Message):
                                                   recursive_download=True,
                                                   recursive_quality=True,
                                                   not_interface=False)
-            album = requests.get(API_ALBUM % quote(event.text.split('/')[-1])).json()
-            tracks = requests.get(API_ALBUM % quote(event.text.split('/')[-1]) + '/tracks?limit=100').json()
+            album = requests.get(API_ALBUM % quote(str(event.text.split('/')[-1]))).json()
+            tracks = requests.get(API_ALBUM % quote(str(event.text.split('/')[-1])) + '/tracks?limit=100').json()
             tmp_cover = requests.get(album['cover_xl'], stream=True).raw
             tmp_titles = []
             tmp_artists = []
             for track in tracks['data']:
                 tmp_titles.append(track['title'])
-                tmp_track = requests.get(API_TRACK % quote(track['id'])).json()
+                tmp_track = requests.get(API_TRACK % quote(str(track['id']))).json()
                 tmp_artist_track = []
                 for c in tmp_track['contributors']:
                     tmp_artist_track.append(c['name'])
@@ -234,9 +248,11 @@ async def get_album(event: types.Message):
             tmp_date = album['release_date'].split('-')
             tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
             await event.answer_photo(tmp_cover,
-                                     caption='<b>Album: {}</b>\n{} - {}\n<a href="{}">Lien de l\'album</a>'.format(
+                                     caption=('<b>Album: {}</b>\n{} - {}\n<a href="{}">' + __('album_link') + '</a>')
+                                     .format(
                                          album['title'], album['artist']['name'],
-                                         tmp_date, album['link']),
+                                         tmp_date, album['link']
+                                     ),
                                      parse_mode='HTML')
 
             # Delete user message
@@ -245,6 +261,9 @@ async def get_album(event: types.Message):
             try:
                 tmp_count = 0
                 group_media = []
+
+                if len(dl.tracks) < 2 or len(dl.tracks) > 10:
+                    raise exceptions.NetworkError('One track !')
 
                 for i in dl.tracks:
                     tmp_song = open(i.song_path, 'rb')
@@ -271,9 +290,9 @@ async def get_album(event: types.Message):
                 shutil.rmtree(os.path.dirname(dl.tracks[0].song_path))
             except FileNotFoundError:
                 pass
-        except KeyError:
+        except Exception as e:
             await tmp_msg.delete()
-            await event.answer("Erreur lors du téléchargement.")
+            await event.answer(__('download_error') + ' ' + str(e))
         finally:
             try:
                 downloading_users.remove(event.from_user.id)
@@ -281,7 +300,7 @@ async def get_album(event: types.Message):
                 pass
 
     else:
-        tmp_err_msg = await event.answer("Un téléchargement est déjà en cours!!")
+        tmp_err_msg = await event.answer(__('running_download'))
         await event.delete()
         await asyncio.sleep(2)
         await tmp_err_msg.delete()
@@ -294,7 +313,7 @@ async def get_playlist(event: types.Message):
         tmp = event.text
         if tmp[-1] == '/':
             tmp = tmp[:-1]
-        tmp_msg = await event.answer("Téléchargement en cours...")
+        tmp_msg = await event.answer(__('downloading'))
         downloading_users.append(event.from_user.id)
         try:
             dl = await download.download_playlistdee(tmp,
@@ -303,14 +322,14 @@ async def get_playlist(event: types.Message):
                                                      recursive_download=True,
                                                      recursive_quality=True,
                                                      not_interface=False)
-            album = requests.get(API_PLAYLIST % quote(event.text.split('/')[-1])).json()
-            tracks = requests.get(API_PLAYLIST % quote(event.text.split('/')[-1]) + '/tracks?limit=100').json()
+            album = requests.get(API_PLAYLIST % quote(str(event.text.split('/')[-1]))).json()
+            tracks = requests.get(API_PLAYLIST % quote(str(event.text.split('/')[-1])) + '/tracks?limit=100').json()
             tmp_cover = requests.get(album['picture_xl'], stream=True).raw
             tmp_titles = []
             tmp_artists = []
             for track in tracks['data']:
                 tmp_titles.append(track['title'])
-                tmp_track = requests.get(API_TRACK % quote(track['id'])).json()
+                tmp_track = requests.get(API_TRACK % quote(str(track['id']))).json()
                 tmp_artist_track = []
                 for c in tmp_track['contributors']:
                     tmp_artist_track.append(c['name'])
@@ -319,8 +338,12 @@ async def get_playlist(event: types.Message):
             tmp_date = album['creation_date'].split(' ')[0].split('-')
             tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
             await event.answer_photo(tmp_cover,
-                                     caption='<b>Playlist: {}</b>\n{} - {}\n<a href="{}">Lien de la playlist</a>'.format(
-                                         album['title'], album['creator']['name'], tmp_date, album['link']),
+                                     caption=('<b>Playlist: {}</b>\n{} - {}\n<a href="{}">'
+                                              + __('playlist_link') + '</a>').format(album['title'],
+                                                                                     album['creator']['name'],
+                                                                                     tmp_date,
+                                                                                     album['link']
+                                                                                     ),
                                      parse_mode='HTML')
 
             # Delete user message
@@ -342,53 +365,52 @@ async def get_playlist(event: types.Message):
                     shutil.rmtree(os.path.dirname(i.song_path))
                 except FileNotFoundError:
                     pass
-        except KeyError:
+        except Exception as e:
             await tmp_msg.delete()
-            await event.answer("Erreur lors du téléchargement.")
+            await event.answer(__('download_error') + ' ' + str(e))
         finally:
             try:
                 downloading_users.remove(event.from_user.id)
             except ValueError:
                 pass
     else:
-        tmp_err_msg = await event.answer("Un téléchargement est déjà en cours!!")
+        tmp_err_msg = await event.answer(__('running_download'))
         await event.delete()
         await asyncio.sleep(2)
         await tmp_err_msg.delete()
 
 
-@dp.message_handler(commands=['help'])
-async def test(event: types.Message):
+@dp.message_handler(commands=['help', 'start'])
+async def help_start(event: types.Message):
     bot_info = await bot.get_me()
     bot_name = bot_info.first_name.replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("`", "\\`")
     bot_username = bot_info.username.replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("`", "\\`")
-    msg = "Salut, je suis *{}*\n".format(bot_name)
-    msg += "_Tu peux m'utiliser en inline :_\n"
-    msg += "@{} \\(album\\|track\\|artist\\) \\<recherche\\>\n".format(bot_username)
-    msg += "Ou envoie un *lien* d'album ou de track Deezer\\!"
+    msg = "Hey, I'm *{}*\n".format(bot_name)
+    msg += "_You can use me in inline mode :_\n"
+    msg += "@{} \\(album\\|track\\|artist\\) \\<search\\>\n".format(bot_username)
+    msg += "Or just send an *Deezer* album or track *link* \\!"
     await event.answer(msg, parse_mode="MarkdownV2")
 
 
 @dp.inline_handler()
 async def inline_echo(inline_query: InlineQuery):
+    items = []
     if inline_query.query:
-        print("oui")
         album = False
         if inline_query.query.startswith('artist '):
             album = True
             tmp_text = 'artist:"{}"'.format(inline_query.query.split('artist ')[1])
-            text = API_SEARCH_TRK % quote(tmp_text)
+            text = API_SEARCH_TRK % quote(str(tmp_text))
         elif inline_query.query.startswith('track '):
             tmp_text = 'track:"{}"'.format(inline_query.query.split('track ')[1])
-            text = API_SEARCH_TRK % quote(tmp_text)
+            text = API_SEARCH_TRK % quote(str(tmp_text))
         elif inline_query.query.startswith('album '):
             album = True
             tmp_text = 'album:"{}"'.format(inline_query.query.split('album ')[1])
-            text = API_SEARCH_TRK % quote(tmp_text)
+            text = API_SEARCH_TRK % quote(str(tmp_text))
         else:
-            text = API_SEARCH_TRK % quote(inline_query.query)
+            text = API_SEARCH_TRK % quote(str(inline_query.query))
 
-        items = []
         try:
             r = requests.get(text).json()
             all_ids = []
@@ -396,13 +418,13 @@ async def inline_echo(inline_query: InlineQuery):
                 tmp_url = i['album']['tracklist']
                 tmp_id = re.search('/album/(.*)/tracks', tmp_url).group(1)
                 if not (album and tmp_id in all_ids):
-                    tmp_album = requests.get(API_ALBUM % quote(tmp_id)).json()
+                    tmp_album = requests.get(API_ALBUM % quote(str(tmp_id))).json()
                     all_ids.append(tmp_id)
                     tmp_date = tmp_album['release_date'].split('-')
                     tmp_date = tmp_date[2] + '/' + tmp_date[1] + '/' + tmp_date[0]
                     if album:
                         title = i['album']['title']
-                        tmp_input = InputTextMessageContent(DEEZER_URL + "/album/%s" % quote(tmp_id))
+                        tmp_input = InputTextMessageContent(DEEZER_URL + "/album/%s" % quote(str(tmp_id)))
                         try:
                             nb = str(len(tmp_album['tracks']['data'])) + ' audio(s)'
                         except KeyError:
@@ -421,11 +443,13 @@ async def inline_echo(inline_query: InlineQuery):
                         thumb_url=i['album']['cover_small'],
                         input_message_content=tmp_input,
                     ))
-        except KeyError:
+        except KeyError as e:
+            print(e)
             pass
-        except AttributeError:
+        except AttributeError as e:
+            print(e)
             pass
-        await bot.answer_inline_query(inline_query.id, results=items, cache_time=2)
+    await bot.answer_inline_query(inline_query.id, results=items, cache_time=300)
 
 
 if __name__ == '__main__':
